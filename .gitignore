@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Project specific - Large media files and transcripts
+data/input/**
+data/output/**
+videos/
+output_media/
+
+# Logs
+*.log
+pipeline_run.log
+
+# Environment variables (keep .env.example instead)
+.env
+
+# Temporary files
+*.tmp
+_chunks_work/
+.cursor/
+
+# Notes output (keep INDEX.md but not individual course notes if too large)
+# notes/*.md  # Uncomment if individual notes are too large

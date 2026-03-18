@@ -1,0 +1,233 @@
+╔══════════════════════════════════════════════════════════════════════════╗
+║                   VideoToText 项目完整地图                               ║
+║                  视频 → 转录 → NotebookLM 笔记                           ║
+╚══════════════════════════════════════════════════════════════════════════╝
+
+【核心工作流】
+═══════════════════════════════════════════════════════════════════════════
+
+  1️⃣  准备视频
+      ↓
+  2️⃣  添加到 data/input/     ← bash scripts/add_video.sh
+      ↓
+  3️⃣  执行流水线              ← bash scripts/run_pipeline.sh
+      ↓
+      ├─ 步骤 1：提取媒体      python src/extract_media.py
+      │           ├─ 输入：data/input/*.mp4
+      │           └─ 输出：data/output/{video_name}/audio.mp3
+      │                      data/output/{video_name}/frame_*.jpg
+      │
+      ├─ 步骤 2：转录          python src/transcribe_audio.py
+      │           ├─ 使用 Groq API
+      │           ├─ 自动分片（文件>18MB）
+      │           └─ 输出：data/output/{video_name}/transcript/{audio.srt, transcript.md}
+      │
+      ├─ 步骤 3：生成笔记      python src/generate_note.py --all
+      │           ├─ 使用 Groq LLM（llama-3.3-70b）
+      │           ├─ 自动合并同课程的多个视频段
+      │           └─ 输出：notes/{course_name}.md + INDEX.md
+      │
+      └─ 步骤 4：清理          rm -rf data/output/*/transcript/_chunks_work/
+      ↓
+  4️⃣  查看笔记
+      └─ notes/{course_name}.md
+      └─ notes/INDEX.md
+
+
+【目录结构 — 唯一数据来源】
+═══════════════════════════════════════════════════════════════════════════
+
+VideoToText/
+│
+├── 🔴 data/                     # 所有数据的唯一来源（无冗余）
+│   │
+│   ├── input/                   # 📥 原始视频（输入队列）
+│   │   │   ↑ add_video.sh 目标位置
+│   │   │
+│   │   ├── 00_12_第十二课：离线签名与应用_01_课前讨论：ERC721 合约与数字签名问题.mp4
+│   │   ├── 00_12_第十二课：离线签名与应用_02_以太坊离线签名与合约验证，详解 EIP-191 与 EIP-712.mp4
+│   │   └── ...（共 7 个视频）
+│   │
+│   └── output/                  # 🔄 处理产物
+│       │   ↓ extract_media.py 生成
+│       │   ↓ transcribe_audio.py 写入
+│       │
+│       ├── 00_12_第十二课：离线签名与应用_01_课前讨论：ERC721 合约与数字签名问题/
+│       │   ├── audio.mp3                    ← 提取的音频
+│       │   ├── frame_0000_0-00-00.jpg       ← 关键帧
+│       │   ├── frame_0001_0-00-02.jpg
+│       │   └── transcript/                  ← 转录文件
+│       │       ├── audio.srt                ← SRT 格式（带时间戳）
+│       │       └── transcript.md            ← Markdown 格式
+│       │
+│       ├── 00_12_第十二课：离线签名与应用_02_以太坊离线签名与合约验证，详解 EIP-191 与 EIP-712/
+│       │   └── ... 同上结构 ...
+│       │
+│       ├── 00_12_第十二课：离线签名与应用_03_ERC20 Permit 与 Permit2，离线签名在 Token 上的应用/
+│       │   └── ... 同上结构 ...
+│       │
+│       ├── 00_12_第十二课：离线签名与应用_04_QA 讨论：求职讨论、AI 与英语/
+│       │   └── ... 同上结构 ...
+│       │
+│       ├── 00_13_第十三课：事件索引_01_答疑：NFTMarket、ABI与DeFi实践/
+│       │   └── ... 同上结构 ...
+│       │
+│       ├── 00_13_第十三课：事件索引_02_区块链事件索引：ABI编码与数据解析/
+│       │   └── ... 同上结构 ...
+│       │
+│       └── 00_13_第十三课：事件索引_03_如何参与贡献开源区块链/
+│           └── ... 同上结构 ...
+│
+├── 🟢 notes/                    # 📚 生成的笔记（输出）
+│   │   ↑ generate_note.py 生成
+│   │
+│   ├── 00_12_第十二课：离线签名与应用.md    ← 4个视频段合并
+│   ├── 00_13_第十三课：事件索引.md          ← 3个视频段合并
+│   ├── INDEX.md                             ← 自动维护的索引
+│   └── （可在 Obsidian 中查看）
+│
+├── 🟡 src/                      # 🔧 核心 Python 脚本
+│   ├── extract_media.py         # 提取音频 + 关键帧
+│   ├── transcribe_audio.py      # 调用 Groq API 转录（增量模式）
+│   └── generate_note.py         # 调用 Groq LLM 生成笔记
+│
+├── 🟣 scripts/                  # 🚀 入口脚本（Bash）
+│   ├── add_video.sh             # ⭐ 【标准入口】添加视频 + 触发流水线
+│   ├── run_pipeline.sh          # 一键执行全流程
+│   └── transcribe_test.sh       # 测试脚本
+│
+├── 🟠 prompts/
+│   └── notebooklm_prompt.md     # 笔记生成提示词（由 generate_note.py 使用）
+│
+├── docs/                        # 📄 文档（参考）
+│   ├── TRANSCRIBE_GUIDE.md
+│   ├── QUICK_REFERENCE.md
+│   └── ...
+│
+├── .env                         # ✅ 环境变量（含 GROQ_API_KEY）
+├── .env.example                 # 模板
+├── requirements.txt             # Python 依赖
+├── README.md                    # 项目简介
+├── WORKFLOW.md                  # ⭐ 【你在这里】 完整工作流说明
+└── PROJECT_STRUCTURE.md         # 旧的结构文档
+
+
+【快速命令速查】
+═══════════════════════════════════════════════════════════════════════════
+
+┌─ 📥 添加视频 ────────────────────────────────────────────────────────────┐
+│                                                                            │
+│  # 方式 A：自动复制 + 触发处理（推荐）                                   │
+│  bash scripts/add_video.sh /path/to/00_14_第十四课_01_YYY.mp4            │
+│                                                                            │
+│  # 方式 B：仅复制，延后处理                                              │
+│  bash scripts/add_video.sh --no-run /path/to/video.mp4                   │
+│  bash scripts/run_pipeline.sh    # 稍后手动运行                          │
+│                                                                            │
+└────────────────────────────────────────────────────────────────────────────┘
+
+┌─ 🚀 执行流水线 ──────────────────────────────────────────────────────────┐
+│                                                                            │
+│  # 标准执行（默认增量模式，跳过已完成）                                  │
+│  bash scripts/run_pipeline.sh                                             │
+│                                                                            │
+│  # 强制重新生成所有笔记                                                  │
+│  bash scripts/run_pipeline.sh --force-note                               │
+│                                                                            │
+│  # 跳过某些步骤                                                          │
+│  bash scripts/run_pipeline.sh --skip-extract       # 仅转录+笔记         │
+│  bash scripts/run_pipeline.sh --skip-transcribe    # 仅提取+笔记         │
+│  bash scripts/run_pipeline.sh --note-only          # 仅笔记              │
+│                                                                            │
+└────────────────────────────────────────────────────────────────────────────┘
+
+┌─ 🔧 单步执行 ─────────────────────────────────────────────────────────────┐
+│                                                                            │
+│  # 仅提取媒体                                                            │
+│  .venv/bin/python src/extract_media.py                                    │
+│                                                                            │
+│  # 仅转录（增量）                                                        │
+│  .venv/bin/python src/transcribe_audio.py                                 │
+│                                                                            │
+│  # 仅转录（全部强制重新）                                                │
+│  TRANSCRIBE_FORCE=true .venv/bin/python src/transcribe_audio.py           │
+│                                                                            │
+│  # 为指定课程生成笔记                                                    │
+│  .venv/bin/python src/generate_note.py --prefix "00_14_第十四课：xxx"    │
+│                                                                            │
+│  # 仅重建 INDEX.md                                                       │
+│  .venv/bin/python src/generate_note.py --update-index                    │
+│                                                                            │
+└────────────────────────────────────────────────────────────────────────────┘
+
+
+【关键特性】
+═══════════════════════════════════════════════════════════════════════════
+
+  ✅ 增量处理
+     - 已提取的视频自动跳过（extract_media.py）
+     - 已转录的音频自动跳过（transcribe_audio.py）
+     - 已生成的笔记自动跳过（generate_note.py）
+     - 使用 --force 或 FORCE=true 可覆盖
+
+  ✅ 自动分片（超大文件处理）
+     - 文件 >18MB 时自动分片（5分钟/片）
+     - 自动处理 413 错误和超时
+     - 分片后重新合并完整转录
+
+  ✅ 课程自动合并
+     - 多个同课程的视频段（00_14_第十四课_01/02/03...）
+     - 自动合并生成一份课程笔记（00_14_第十四课：xxx.md）
+     - 按视频顺序排列内容
+
+  ✅ INDEX.md 自动维护
+     - 每次生成笔记后自动更新
+     - Wiki 链接格式 [[笔记名]]
+     - 包含课程、段数、时长、转录行数、关键帧数统计
+
+
+【环境要求】
+═══════════════════════════════════════════════════════════════════════════
+
+  ✔ Python 3.9+
+  ✔ .env 中设置 GROQ_API_KEY（必需）
+  ✔ 依赖包：groq, moviepy, opencv-python, tqdm, python-dotenv, openai-whisper
+
+
+【数据流向示意】
+═══════════════════════════════════════════════════════════════════════════
+
+  data/input/
+  ├─ 00_14_视频段01.mp4 ──┐
+  ├─ 00_14_视频段02.mp4 ──┤
+  └─ 00_14_视频段03.mp4 ──┤
+                          ↓
+                   extract_media.py
+                          ↓
+  data/output/
+  ├─ 00_14_视频段01/
+  │   ├─ audio.mp3 ──┐
+  │   ├─ frame_*.jpg │
+  │   └─ transcript/ │
+  ├─ 00_14_视频段02/ │
+  │   ├─ audio.mp3 ──┤ transcribe_audio.py
+  │   ├─ frame_*.jpg │
+  │   └─ transcript/ │
+  ├─ 00_14_视频段03/ │
+  │   └─ ...       ──┤
+  │                 ↓
+  │          (transcript/
+  │           ├─ audio.srt
+  │           └─ transcript.md)
+  │                 ↓
+  │           generate_note.py
+  │           (合并 3 个段)
+  │                 ↓
+  notes/
+  └─ 00_14_第十四课：xxx.md  ← 最终笔记
+  └─ INDEX.md  ← 自动更新
+
+
+═══════════════════════════════════════════════════════════════════════════
+更新时间：2026-03-18
+═══════════════════════════════════════════════════════════════════════════
