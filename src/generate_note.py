@@ -171,9 +171,14 @@ def _build_segment_prompt(seg: Dict, prompt_text: str, seg_idx: int, total: int)
         "请将输出分为以下三个标记块，每块之间用分隔符隔开：",
         "",
         "===MINDMAP===",
-        "（此处输出本视频段的思维导图内容，使用 Markdown 列表格式。",
-        "层次：核心主题 → 子概念 → 关键论据/例子。",
-        "每个要点必须附带精确时间戳，格式如 `[00:05:30]`。）",
+        "（此处输出本视频段的思维导图内容，使用 Markdown 标题层级格式（## 和 ### 和 ####），",
+        "不要使用列表符号（-）。层次：## 核心主题 → ### 子概念 → #### 关键论据/例子。",
+        "每个节点必须附带精确时间戳，格式如 `[00:05:30]`，写在标题文字之后同一行。",
+        "示例：",
+        "## EIP-712 结构化签名 [00:12:00]",
+        "### 解决问题：可读性差的 bytes 签名",
+        "### 实现：TypedData + domain separator [00:15:30]",
+        "#### 关键字段：chainId, verifyingContract）",
         "",
         "===DATATABLE===",
         "（此处输出本视频段的数据表格行，不含表头。",
@@ -309,11 +314,16 @@ def generate_for_prefix(
                 "detail":    f"> ⚠️ 本章节生成失败：{e}",
             }
 
-        all_mindmap.append(f"- **{seg_short}**")
-        # 把每段 mindmap 内容缩进一级，挂在段标题下
+        # 每段作为 markmap 的一级分支（## 标题），其内容降一级（## → ###, ### → ####）
+        all_mindmap.append(f"## {seg_short}")
         for line in blocks["mindmap"].splitlines():
-            if line.strip():
-                all_mindmap.append(f"  {line}")
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                # 已有标题层级：整体降一级（## → ###）
+                all_mindmap.append("#" + line.lstrip("#").rstrip() if stripped.startswith("##") else line)
+            elif stripped:
+                # 非标题行（意外输出的列表等）：作为三级节点
+                all_mindmap.append(f"### {stripped.lstrip('- ').lstrip('* ')}")
         all_mindmap.append("")
 
         all_datatable.extend(
@@ -364,15 +374,21 @@ def generate_for_prefix(
             f"- **{seg_short}**：时长 {seg['duration']}，"
             f"{seg['srt_lines']:,} 行转录，{seg['frame_count']:,} 张关键帧"
         )
+    # markmap 代码块：根节点为课程名，各段为一级分支
+    markmap_body = "\n".join(all_mindmap).strip()
     parts += [
         "",
         "---",
         "",
         "## 1. 结构化思维导图 (Mind Map)",
         "",
-        f"- **{prefix}**",
+        "> 需要 Obsidian 插件 [Mindmap NextGen](obsidian://show-plugin?id=mindmap-nextgen) 或 [Render Block Markmap](obsidian://show-plugin?id=obsidian-render-block-markmap) 以渲染交互式思维导图。",
+        "",
+        "```markmap",
+        f"# {prefix}",
+        markmap_body,
+        "```",
     ]
-    parts.extend(f"  {line}" if line.strip() else "" for line in "\n".join(all_mindmap).splitlines())
     parts += [
         "",
         "---",
