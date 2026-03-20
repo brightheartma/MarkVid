@@ -3,4 +3,4 @@ python-dotenv>=1.0.0
 moviepy>=2.0.0
 opencv-python>=4.8.0
 tqdm>=4.66.0
-openai-whisper>=20231117
+faster-whisper>=1.0.0
