@@ -53,48 +53,69 @@ def extract_from_video(video_path, output_dir, frame_interval=60):
     except Exception as e:
         return f"失败: {str(e)}"
 
+def _already_extracted(output_dir: str) -> bool:
+    """判断该视频是否已提取过（audio.mp3 + 至少一张关键帧均存在）"""
+    if not os.path.isdir(output_dir):
+        return False
+    if not os.path.exists(os.path.join(output_dir, "audio.mp3")):
+        return False
+    for f in os.listdir(output_dir):
+        if f.startswith("frame_") and f.endswith(".jpg"):
+            return True
+    return False
+
 def batch_process_videos_concurrent(input_folder, output_base_folder, frame_interval=30, max_workers=None):
-    """【核心修改】加入 tqdm 进度条的并发处理逻辑"""
+    """加入增量跳过 + tqdm 进度条的并发处理逻辑"""
     if not os.path.exists(input_folder):
         print(f"错误：输入文件夹 '{input_folder}' 不存在。")
         return
 
     valid_extensions = ('.mp4', '.mov', '.avi', '.mkv')
     tasks = []
-    
-    # 1. 收集任务
-    for file_name in os.listdir(input_folder):
+    skipped = []
+
+    # 1. 收集任务，增量跳过已提取的视频
+    for file_name in sorted(os.listdir(input_folder)):
         if file_name.lower().endswith(valid_extensions):
             video_path = os.path.join(input_folder, file_name)
             base_name = os.path.splitext(file_name)[0]
             output_dir = os.path.join(output_base_folder, base_name)
-            tasks.append((video_path, output_dir, frame_interval))
+            if _already_extracted(output_dir):
+                skipped.append(file_name)
+            else:
+                tasks.append((video_path, output_dir, frame_interval))
 
-    if not tasks:
+    total = len(tasks) + len(skipped)
+    if total == 0:
         print("未在目录中找到支持的视频文件。")
         return
 
-    print(f"找到 {len(tasks)} 个视频，开始多进程并发处理...\n")
+    # 2. 打印跳过摘要（不逐条列出）
+    if skipped:
+        print(f"⏭️  已跳过 {len(skipped)} 个（已提取，增量模式）")
 
-    # 2. 并发执行与进度追踪
+    if not tasks:
+        print(f"✅ 全部 {total} 个视频均已提取，无需处理。")
+        return
+
+    print(f"🚀 新增 {len(tasks)} 个视频，开始多进程并发处理...\n")
+
+    # 3. 并发执行与进度追踪
     with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
         future_to_video = {
-            executor.submit(extract_from_video, path, out_dir, interval): os.path.basename(path) 
+            executor.submit(extract_from_video, path, out_dir, interval): os.path.basename(path)
             for path, out_dir, interval in tasks
         }
-        
-        # 使用 tqdm 初始化进度条
+
         with tqdm(total=len(tasks), desc="处理进度", unit="视频") as pbar:
             for future in concurrent.futures.as_completed(future_to_video):
                 video_name = future_to_video[future]
                 try:
                     result = future.result()
-                    # 必须使用 tqdm.write 替代 print，防止终端进度条被文本冲刷得七零八落
                     tqdm.write(f"[完成] {video_name} -> {result}")
                 except Exception as exc:
                     tqdm.write(f"[报错] {video_name} 产生了异常: {exc}")
                 finally:
-                    # 无论成功或失败，每完成一个任务，进度条推进一步
                     pbar.update(1)
 
 if __name__ == "__main__":

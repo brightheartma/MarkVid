@@ -24,6 +24,8 @@ ENC_AUDIO_CHANNELS = os.getenv("TRANSCRIBE_AC", "1")
 ENC_AUDIO_BITRATE = os.getenv("TRANSCRIBE_AB", "32k")
 # 增量转录配置
 FORCE_RETRANSCRIBE = os.getenv("TRANSCRIBE_FORCE", "").lower() == "true"  # 强制重新转录所有文件
+# 本地双擎配置：large-v3-turbo 速度最快；medium 占用内存最低
+LOCAL_WHISPER_MODEL = os.getenv("LOCAL_WHISPER_MODEL", "large-v3-turbo")
 
 def format_time(seconds):
     """将秒数转换为 HH:MM:SS"""
@@ -139,6 +141,46 @@ def _is_timeout(err: Exception) -> bool:
     s = str(err).lower()
     return ("timed out" in s) or ("timeout" in s)
 
+def _is_rate_limit(err: Exception) -> bool:
+    s = str(err)
+    return ("429" in s) or ("rate_limit_exceeded" in s) or ("rate limit" in s.lower())
+
+# ─── 本地双擎状态（懒加载，仅 ASPH 耗尽后才激活）─────────────────────────────
+_local_whisper_model = None
+_is_fallback_mode = False
+
+def transcribe_via_local(audio_path: str) -> List[dict]:
+    """
+    本地 faster-whisper 引擎。懒加载：只有云端 ASPH 额度耗尽后才初始化。
+    返回与 Groq API 相同格式的 segments 列表。
+    """
+    global _local_whisper_model
+    if _local_whisper_model is None:
+        print(f"\n   ⚙️  [双擎启动] 正在唤醒本地 Whisper 模型 ({LOCAL_WHISPER_MODEL}) ...", flush=True)
+        print(f"   (首次运行会自动下载模型权重，约 1.5GB，请耐心等待)", flush=True)
+        from faster_whisper import WhisperModel
+        # device="auto" 会自动选择 CUDA（N卡）或 CPU（Mac/无显卡）
+        _local_whisper_model = WhisperModel(LOCAL_WHISPER_MODEL, device="auto", compute_type="default")
+        print("   ✅ 本地引擎预热完毕，已接管转录任务！\n", flush=True)
+
+    segments_gen, _ = _local_whisper_model.transcribe(audio_path, beam_size=5, language="zh")
+    return [{"start": s.start, "end": s.end, "text": s.text} for s in segments_gen]
+
+def _format_api_error(err: Exception) -> str:
+    """将 API 错误精简为一行：优先提取 429 限流的等待时间，其余显示 Error code。"""
+    s = str(err)
+    # 429 限流：提取 "Please try again in Xm Ys"
+    m = re.search(r"Please try again in ([^\.']+)", s)
+    if m:
+        wait = m.group(1).strip()
+        # 判断是 ASPH 还是 TPM
+        if "seconds of audio" in s or "ASPH" in s:
+            return f"429 Whisper ASPH 限额已满，请等待 {wait} 后重试"
+        return f"429 限流，请等待 {wait} 后重试"
+    # 其他错误：只取第一行
+    first_line = s.split("\n")[0][:120]
+    return first_line
+
 def transcribe_via_groq(
     client: Groq,
     audio_path: str,
@@ -201,25 +243,10 @@ def _check_transcription_exists(srt_path: str, md_path: str) -> bool:
     """检查转录文件是否已存在（增量转录的关键逻辑）"""
     return os.path.exists(srt_path) and os.path.exists(md_path)
 
-def _get_transcript_info(srt_path: str) -> Optional[dict]:
-    """读取已有的 SRT 文件，返回统计信息"""
-    if not os.path.exists(srt_path):
-        return None
-    try:
-        with open(srt_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-        line_count = len(lines)
-        file_size_kb = os.path.getsize(srt_path) / 1024
-        return {
-            "lines": line_count,
-            "size_kb": file_size_kb,
-            "exists": True
-        }
-    except Exception:
-        return None
 
 def batch_transcribe_with_api(base_dir):
-    """使用 Groq API 批量极速转录音频（支持增量转录）"""
+    """使用 Groq API 批量极速转录音频（支持增量转录 + 本地双擎托底）"""
+    global _is_fallback_mode
     output_dir = os.path.join(base_dir, "data", "output")
     if not os.path.exists(output_dir):
         print(f"错误：找不到目录 {output_dir}")
@@ -239,7 +266,9 @@ def batch_transcribe_with_api(base_dir):
     folders = sorted(os.listdir(output_dir))
     print(f"\n📊 开始扫描转录任务（共 {len(folders)} 个文件夹）...", flush=True)
     print("=" * 70, flush=True)
-    
+
+    skipped_names: List[str] = []
+
     for folder in folders:
         folder_path = os.path.join(output_dir, folder)
         if not os.path.isdir(folder_path):
@@ -254,7 +283,7 @@ def batch_transcribe_with_api(base_dir):
         
         # 检查音频文件是否存在
         if not os.path.exists(audio_path):
-            print(f"⏭️  跳过: {folder}（未找到 audio.mp3）", flush=True)
+            skipped_names.append(folder)
             stats["skipped"] += 1
             continue
         
@@ -262,61 +291,80 @@ def batch_transcribe_with_api(base_dir):
         transcript_exists = _check_transcription_exists(srt_path, md_path)
         
         if transcript_exists and not FORCE_RETRANSCRIBE:
-            transcript_info = _get_transcript_info(srt_path)
-            print(f"✅ 已转录: {folder}", flush=True)
-            if transcript_info:
-                print(f"   📄 SRT: {transcript_info['lines']} 行, {transcript_info['size_kb']:.1f}KB", flush=True)
+            skipped_names.append(folder)
             stats["skipped"] += 1
             continue
-        
+
+        # 在开始新转录前，先打印已收集的跳过摘要
+        if skipped_names:
+            print(f"⏭️  已跳过 {len(skipped_names)} 个（已有转录）", flush=True)
+            skipped_names = []
+
         if transcript_exists and FORCE_RETRANSCRIBE:
             print(f"\n🔄 强制重新转录: {folder}（--force 标志已启用）", flush=True)
         else:
-            print(f"\n🚀 正在通过 Groq API 极速转录: {folder} ...", flush=True)
-        
+            engine_tag = "🐢 本地双擎" if _is_fallback_mode else "🚀 Groq 云端"
+            print(f"\n[{engine_tag}] 转录: {folder} ...", flush=True)
+
         try:
             size_b = _file_size_bytes(audio_path)
-            need_chunk = size_b >= CHUNK_WHEN_OVER_BYTES
             work_dir = os.path.join(transcript_dir, "_chunks_work")
 
-            if need_chunk:
+            # 【分支 1】已触发降级，直接走本地，不再请求 Groq
+            if _is_fallback_mode:
+                print(f"  -> 🐢 [本地托底] API 限额冷却中，使用本地算力转录...", flush=True)
+                segments = transcribe_via_local(audio_path)
+
+            # 【分支 2】大文件 → 云端分片；mid-chunk 遇 429 则降级本地
+            elif size_b >= CHUNK_WHEN_OVER_BYTES:
                 print(
-                    f"  -> 文件较大（{size_b/1024/1024:.1f}MB），启用分片：{CHUNK_SECONDS}s/片，转码 {ENC_AUDIO_CHANNELS}ch {ENC_AUDIO_RATE}Hz {ENC_AUDIO_BITRATE}",
+                    f"  -> ☁️  文件较大（{size_b/1024/1024:.1f}MB），分片：{CHUNK_SECONDS}s/片，"
+                    f"转码 {ENC_AUDIO_CHANNELS}ch {ENC_AUDIO_RATE}Hz {ENC_AUDIO_BITRATE}",
                     flush=True,
                 )
-                segments = transcribe_with_chunking(
-                    client,
-                    audio_path,
-                    work_dir,
-                    chunk_seconds=CHUNK_SECONDS,
-                    model="whisper-large-v3",
-                )
+                try:
+                    segments = transcribe_with_chunking(
+                        client, audio_path, work_dir,
+                        chunk_seconds=CHUNK_SECONDS, model="whisper-large-v3",
+                    )
+                except Exception as chunk_e:
+                    if _is_rate_limit(chunk_e):
+                        print(f"  -> ⚠️  [防崩拦截] 分片途中 ASPH 耗尽！无缝切换本地双擎！", flush=True)
+                        _is_fallback_mode = True
+                        segments = transcribe_via_local(audio_path)
+                    else:
+                        raise
+
+            # 【分支 3】小文件 → 云端直传；遇 429 降级本地，遇 413/超时降级分片
             else:
                 try:
                     segments = transcribe_via_groq(client, audio_path, model="whisper-large-v3")
-                except Exception as e:
-                    # 413 / 超时等：自动降级到分片
-                    if _is_request_too_large(e) or _is_timeout(e):
-                        print("  -> 单次请求失败（413/超时），改为分片重试。", flush=True)
+                except Exception as inner_e:
+                    if _is_rate_limit(inner_e):
+                        print(f"  -> ⚠️  [防崩拦截] Groq ASPH 耗尽！无缝切换本地双擎！", flush=True)
+                        _is_fallback_mode = True
+                        segments = transcribe_via_local(audio_path)
+                    elif _is_request_too_large(inner_e) or _is_timeout(inner_e):
+                        print("  -> 单次请求超载（413/超时），改为分片重试。", flush=True)
                         segments = transcribe_with_chunking(
-                            client,
-                            audio_path,
-                            work_dir,
-                            chunk_seconds=CHUNK_SECONDS,
-                            model="whisper-large-v3",
+                            client, audio_path, work_dir,
+                            chunk_seconds=CHUNK_SECONDS, model="whisper-large-v3",
                         )
                     else:
                         raise
 
             write_srt(segments, srt_path)
             write_markdown_transcript(segments, md_path, folder)
-
-            print(f"  -> ✅ 成功: SRT 已保存至 {srt_path}", flush=True)
-            print(f"  -> ✅ 成功: Markdown 已保存至 {md_path}", flush=True)
+            print(f"  -> ✅ 成功: {folder}", flush=True)
             stats["transcribed"] += 1
         except Exception as e:
-            print(f"  -> ❌ 失败: API 请求出错 ({e})", flush=True)
+            err_msg = _format_api_error(e)
+            print(f"  -> ❌ 失败: {folder}  [{err_msg}]", flush=True)
             stats["failed"] += 1
+
+    # 循环结束后，打印剩余的跳过摘要（全部跳过时）
+    if skipped_names:
+        print(f"⏭️  已跳过 {len(skipped_names)} 个（已有转录）", flush=True)
     
     # 聚合 SRT 文件，按课程前缀分类到 data/srt_exports/
     srt_exports_dir = os.path.join(base_dir, "data", "srt_exports")
@@ -356,7 +404,10 @@ def batch_transcribe_with_api(base_dir):
     print(f"  - ✅ 已转录: {stats['transcribed']}", flush=True)
     print(f"  - ⏭️  已跳过（已有转录）: {stats['skipped']}", flush=True)
     print(f"  - ❌ 转录失败: {stats['failed']}", flush=True)
-    print(f"  - 运行模式: {'强制重新转录所有' if FORCE_RETRANSCRIBE else '增量转录（仅处理新文件）'}", flush=True)
+    mode_str = "强制重新转录所有" if FORCE_RETRANSCRIBE else "增量转录（仅处理新文件）"
+    if _is_fallback_mode:
+        mode_str += f" + 🐢 本地双擎托底（{LOCAL_WHISPER_MODEL}）"
+    print(f"  - 运行模式: {mode_str}", flush=True)
     print("", flush=True)
 
 def print_usage():

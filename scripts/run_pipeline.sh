@@ -3,11 +3,15 @@
 # run_pipeline.sh — VideoToText 完整流水线
 # =============================================================================
 # 用法：
-#   bash scripts/run_pipeline.sh               # 全流程（默认增量）
-#   bash scripts/run_pipeline.sh --force-note  # 强制重新生成所有笔记
-#   bash scripts/run_pipeline.sh --skip-extract # 跳过媒体提取（仅转录+笔记）
+#   bash scripts/run_pipeline.sh                   # 全流程（默认增量）
+#   bash scripts/run_pipeline.sh --skip-note       # 提取+转录，跳过笔记（新视频用）
+#   bash scripts/run_pipeline.sh --transcribe-only # 仅转录（已提取过，跳过提取和笔记）
+#   bash scripts/run_pipeline.sh --note-only       # 仅重建笔记和索引（已转录过）
+#   bash scripts/run_pipeline.sh --skip-extract    # 跳过媒体提取（仅转录+笔记）
 #   bash scripts/run_pipeline.sh --skip-transcribe # 跳过转录（仅提取+笔记）
-#   bash scripts/run_pipeline.sh --note-only   # 仅重建笔记和索引
+#   bash scripts/run_pipeline.sh --force-note      # 强制重新生成所有笔记
+#   bash scripts/run_pipeline.sh --force-transcribe # 强制重新转录所有音频
+#   bash scripts/run_pipeline.sh --force-all       # 全部强制重新处理
 # =============================================================================
 
 set -euo pipefail
@@ -20,7 +24,9 @@ PYTHON="${PROJECT_ROOT}/.venv/bin/python"
 # ─── 参数解析 ─────────────────────────────────────────────────────────────────
 SKIP_EXTRACT=false
 SKIP_TRANSCRIBE=false
+SKIP_NOTE=false
 NOTE_ONLY=false
+TRANSCRIBE_ONLY=false
 FORCE_NOTE=false
 FORCE_TRANSCRIBE=false
 
@@ -29,6 +35,8 @@ for arg in "$@"; do
         --skip-extract)      SKIP_EXTRACT=true ;;
         --skip-transcribe)   SKIP_TRANSCRIBE=true ;;
         --note-only)         NOTE_ONLY=true; SKIP_EXTRACT=true; SKIP_TRANSCRIBE=true ;;
+        --skip-note)         SKIP_NOTE=true ;;
+        --transcribe-only)   TRANSCRIBE_ONLY=true; SKIP_EXTRACT=true; SKIP_NOTE=true ;;
         --force-note)        FORCE_NOTE=true ;;
         --force-transcribe)  FORCE_TRANSCRIBE=true ;;
         --force-all)         FORCE_NOTE=true; FORCE_TRANSCRIBE=true ;;
@@ -75,11 +83,15 @@ else
 fi
 
 # ─── Step 3: 生成笔记 + 更新 INDEX ────────────────────────────────────────────
-step "Step 3 / 3 — 生成课程笔记 + 更新 INDEX.md"
-NOTE_ARGS=("--all")
-[[ "$FORCE_NOTE" == true ]] && NOTE_ARGS+=("--force")
-"$PYTHON" "${PROJECT_ROOT}/src/generate_note.py" "${NOTE_ARGS[@]}"
-ok "笔记生成完成，INDEX.md 已自动更新"
+if [[ "$SKIP_NOTE" == false ]]; then
+    step "Step 3 / 3 — 生成课程笔记 + 更新 INDEX.md"
+    NOTE_ARGS=("--all")
+    [[ "$FORCE_NOTE" == true ]] && NOTE_ARGS+=("--force")
+    "$PYTHON" "${PROJECT_ROOT}/src/generate_note.py" "${NOTE_ARGS[@]}"
+    ok "笔记生成完成，INDEX.md 已自动更新"
+else
+    echo "⏭️  跳过 Step 3（--skip-note）"
+fi
 
 # ─── 清理临时文件 ─────────────────────────────────────────────────────────────
 step "清理临时分片文件"
