@@ -1,13 +1,24 @@
 # 笔记生成 Prompt 文档（与 generate_note.py 同步）
 
-> **说明**：此文件为 `src/generate_note.py` 中 `_build_segment_prompt()` 函数所使用 Prompt 的文档化版本，供人工审阅与调整参考。每次修改 Python 中的 Prompt 逻辑后，应同步更新此文件。
+> **说明**：此文件为 `src/generate_note.py` 中分段 Prompt（`_build_segment_prompt()`）、课程简报 Prompt（`_build_briefing_prompt()`）的文档化版本，供人工审阅与调整参考。每次修改 Python 中的 Prompt 逻辑后，应同步更新本文件。
+
+---
+
+## 转录数据源（与 `data/srt_exports/` 的关系）
+
+| 来源 | 路径约定 | 说明 |
+| :--- | :--- | :--- |
+| 流水线输出 | `data/output/{段目录}/transcript/audio.srt` | 可与同段目录下关键帧一并统计 `frames` |
+| 导出归档 | `data/srt_exports/{课程前缀}/*.srt` | 每课一个子文件夹，每段一个 `.srt` 文件；**无 `data/output` 时脚本仍可从该目录发现课程** |
+
+**同一课程前缀**在两边同时存在时，脚本**只采用 `data/output`**，避免重复。仅存在 `srt_exports` 时，`frames` 记为 `0`。
 
 ---
 
 ## 角色与目标
 
 你是一个高信噪比的视频课程内容分析师。  
-针对每个视频段的 SRT 转录文本，生成结构化的三区块笔记内容。  
+针对每个视频段的 SRT 转录文本，生成结构化的 **三区块**（`<<<MINDMAP>>>` / `<<<DATATABLE>>>` / `<<<DETAIL>>>`）笔记内容；全部段完成后，再基于**全课转录**生成一节 **简报**（见文末「课程级简报」）。  
 最终由 Python 脚本汇总为可在 Obsidian 中完美渲染的 Markdown 课程笔记。
 
 ---
@@ -114,9 +125,22 @@ title / created / segments / duration / srt_lines / frames
 > 课程概况
 
 ## 0. 素材与覆盖范围
-## 1. 结构化思维导图 (Mind Map)   ← markmap 代码块
-## 2. 综合数据表格 (Data Table)   ← 汇总所有段的表格行
-## 3. 各段详情 (Segment Details)  ← 每段一个 ### 3.X 小节
+## 1. 简报 (Briefing)               ← 全课转录综合，执行摘要 + 正文
+## 2. 结构化思维导图 (Mind Map)   ← markmap 代码块
+## 3. 综合数据表格 (Data Table)   ← 汇总所有段的表格行
+## 4. 各段详情 (Segment Details)  ← 每段一个 ### 4.X 小节
 ```
 
 `notes/INDEX.md` 和 `notes/000_我的视频知识大盘.md` 在每次生成后自动更新。
+
+---
+
+## 课程级简报：`NOTE_BRIEFING_CHARS`（`generate_note.py`）
+
+在**所有分段**的 `<<<MINDMAP>>>` / `<<<DATATABLE>>>` / `<<<DETAIL>>>` 生成完成后，脚本会再调用一次 LLM：合并全课转录（超长则头尾截断，上限默认 `NOTE_BRIEFING_CHARS=12000`），生成 **## 1. 简报 (Briefing)**。
+
+**写作要求（与实现对齐）**：在反幻觉前提下，按下列英文规范内化撰写（输出为简体中文，结构含执行摘要 + 分主题正文）：
+
+> Create a comprehensive briefing document that synthesizes the main themes and ideas from the sources. Start with a concise Executive Summary that presents the most critical takeaways upfront. The body of the document must provide a detailed and thorough examination of the main themes, evidence, and conclusions found in the sources. This analysis should be structured logically with headings and bullet points to ensure clarity. The tone must be objective and incisive.
+
+**笔记中的章节编号**：`0` 素材 → `1` 简报 → `2` Mind Map → `3` Data Table → `4` 各段详情（分段小标题为 `### 4.x`）。

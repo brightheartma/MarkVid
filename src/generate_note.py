@@ -2,6 +2,7 @@
 generate_note.py
 ----------------
 按课程前缀聚合分段转录，调用 LLM 生成：
+0) 课程级简报（Executive Summary + 正文分析，基于全课转录综合）
 1) 思维导图（Markdown 列表 → markmap 代码块）
 2) 综合数据表格
 3) 各段详情
@@ -25,6 +26,7 @@ from groq import Groq
 # ─── 路径配置 ─────────────────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).resolve().parent.parent
 OUTPUT_MEDIA = BASE_DIR / "data" / "output"
+SRT_EXPORTS_DIR = BASE_DIR / "data" / "srt_exports"
 NOTES_DIR = BASE_DIR / "notes"
 PROMPTS_DIR = BASE_DIR / "prompts"
 PROMPT_FILE = PROMPTS_DIR / "notebooklm_prompt.md"
@@ -34,6 +36,7 @@ INDEX_FILE = NOTES_DIR / "INDEX.md"
 NOTE_MODEL = os.getenv("NOTE_MODEL", "llama-3.3-70b-versatile")
 NOTE_MAX_TOKENS = int(os.getenv("NOTE_MAX_TOKENS", "4096"))
 NOTE_SRT_CHARS = int(os.getenv("NOTE_SRT_CHARS", "4000"))
+NOTE_BRIEFING_CHARS = int(os.getenv("NOTE_BRIEFING_CHARS", "12000"))
 NOTE_SEGMENT_SLEEP = int(os.getenv("NOTE_SEGMENT_SLEEP", "10"))
 
 # ─── 预编译正则 ───────────────────────────────────────────────────────────────
@@ -147,8 +150,8 @@ def get_note_prefix(folder_name: str) -> str:
     return folder_name[: matches[-1].start()] if matches else folder_name
 
 
-def _scan_all_segments() -> Dict[str, List[Dict]]:
-    """一次扫描 data/output，按课程前缀分组返回所有段落元数据。"""
+def _scan_output_segments() -> Dict[str, List[Dict]]:
+    """扫描 data/output/{段目录}/transcript/audio.srt（含关键帧目录）。"""
     grouped: Dict[str, List[Dict]] = {}
     if not OUTPUT_MEDIA.exists():
         return grouped
@@ -172,6 +175,55 @@ def _scan_all_segments() -> Dict[str, List[Dict]]:
             "frame_count": _frame_count(folder),
         }
         grouped.setdefault(prefix, []).append(seg)
+
+    return grouped
+
+
+def _scan_srt_exports_segments() -> Dict[str, List[Dict]]:
+    """扫描 data/srt_exports/{课程前缀}/*.srt（每文件一段，无关键帧时 frame_count=0）。
+
+    与 output 并存时：**同一课程前缀仅以 output 为准**，避免重复生成。
+    """
+    grouped: Dict[str, List[Dict]] = {}
+    if not SRT_EXPORTS_DIR.exists():
+        return grouped
+
+    for course_dir in sorted(SRT_EXPORTS_DIR.iterdir()):
+        if not course_dir.is_dir():
+            continue
+        prefix = course_dir.name
+        srts = sorted(course_dir.glob("*.srt"))
+        if not srts:
+            continue
+
+        segs: List[Dict] = []
+        for srt_path in srts:
+            srt_text, srt_lines, duration = _read_srt_meta(srt_path)
+            stem = srt_path.stem
+            folder_name = f"{prefix}_{stem}"
+            segs.append(
+                {
+                    "folder": folder_name,
+                    "path": course_dir,
+                    "srt": srt_path,
+                    "srt_text": srt_text,
+                    "duration": duration,
+                    "srt_lines": srt_lines,
+                    "frame_count": 0,
+                }
+            )
+        grouped[prefix] = segs
+
+    return grouped
+
+
+def _scan_all_segments() -> Dict[str, List[Dict]]:
+    """合并 data/output 与 data/srt_exports；同一前缀优先使用 output 段落。"""
+    grouped = _scan_output_segments()
+    exports = _scan_srt_exports_segments()
+    for prefix, segs in exports.items():
+        if prefix not in grouped:
+            grouped[prefix] = segs
 
     for segs in grouped.values():
         segs.sort(key=lambda x: x["folder"])
@@ -236,6 +288,87 @@ def _build_segment_prompt(seg: Dict, seg_idx: int, total: int) -> str:
         "",
         "<<<END>>>",
     ])
+
+
+def _concatenate_course_srt(segments: List[Dict], max_chars: int) -> str:
+    """合并全课各段转录，超长时头尾截断。"""
+    parts: List[str] = []
+    for seg in segments:
+        short = seg["folder"].split("_", 3)[-1] if "_" in seg["folder"] else seg["folder"]
+        parts.append(f"\n\n=== 视频段：{short} ===\n\n")
+        parts.append(seg.get("srt_text", ""))
+    full = _apply_whisper_corrections("".join(parts).strip())
+    if len(full) <= max_chars:
+        return full
+    return _truncate_srt(full, max_chars)
+
+
+def _build_briefing_prompt(prefix: str, segments: List[Dict], combined_srt: str) -> str:
+    seg_list = ", ".join(
+        s["folder"].split("_", 3)[-1] if "_" in s["folder"] else s["folder"]
+        for s in segments
+    )
+    return "\n".join([
+        "你是资深课程内容分析师，需根据下方**完整课程转录**撰写一份简报。",
+        "",
+        "【最高优先级——反幻觉】",
+        "1. 论点、事实、术语必须能在转录中找到依据；禁止编造转录中不存在的内容。",
+        "2. 禁止逐字复述本提示词中的英文说明。",
+        "3. 输出语言：简体中文（专有名词可保留英文）。",
+        "",
+        "【简报写作要求（须严格满足结构与语气）】",
+        "Create a comprehensive briefing document that synthesizes the main themes and ideas "
+        "from the sources. Start with a concise Executive Summary that presents the most "
+        "critical takeaways upfront. The body of the document must provide a detailed and "
+        "thorough examination of the main themes, evidence, and conclusions found in the "
+        "sources. This analysis should be structured logically with headings and bullet points "
+        "to ensure clarity. The tone must be objective and incisive.",
+        "",
+        f"课程名称：{prefix}",
+        f"包含视频段（共 {len(segments)} 段）：{seg_list}",
+        "",
+        "--- 课程转录（sources）---",
+        combined_srt,
+        "",
+        "--- 输出格式（直接输出 Markdown 正文，勿加外层代码块包裹全文）---",
+        "以二级标题 `## 执行摘要` 开头，用若干短段落或要点列出最关键结论（对应 Executive Summary）。",
+        "随后用二级标题组织正文（例如 `## 主题与论证`、`## 证据与结论` 等，按内容自拟），",
+        "正文中充分使用三级标题与无序列表，层次清晰。",
+        "全文不要使用一级标题 `#`。",
+    ])
+
+
+def _clean_briefing(text: str) -> str:
+    """去除简报输出中的标记泄漏与外层 markdown 包裹。"""
+    lines = text.splitlines()
+    if lines and _RE_MARKDOWN_WRAP.match(lines[0]):
+        lines = lines[1:]
+        for i in range(len(lines) - 1, -1, -1):
+            if _RE_BACKTICK_LINE.match(lines[i].strip()):
+                lines = lines[:i]
+                break
+        text = "\n".join(lines)
+
+    out: List[str] = []
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("<<<"):
+            continue
+        out.append(line)
+
+    cleaned = "\n".join(out).strip()
+    if cleaned.startswith("# "):
+        # 去掉单一整课标题，避免与笔记主标题重复
+        rest = cleaned.split("\n", 1)
+        if len(rest) > 1:
+            cleaned = rest[1].strip()
+
+    if not cleaned:
+        cleaned = (
+            "## 执行摘要\n\n"
+            "- 转录内容不足或生成失败，请检查 `NOTE_BRIEFING_CHARS` 或重试生成。\n"
+        )
+    return cleaned
 
 
 # ─── LLM 调用 ─────────────────────────────────────────────────────────────────
@@ -542,10 +675,26 @@ def generate_for_prefix(
 
         all_datatable.extend(r.strip() for r in blocks["datatable"].splitlines() if r.strip().startswith("|"))
 
-        all_detail.append(f"\n### 3.{i} {seg_short}\n\n{blocks['detail']}\n")
+        all_detail.append(f"\n### 4.{i} {seg_short}\n\n{blocks['detail']}\n")
 
         if i < len(segments):
             time.sleep(NOTE_SEGMENT_SLEEP)
+
+    # ── 课程级简报（全课转录综合）──
+    if len(segments) > 0:
+        time.sleep(NOTE_SEGMENT_SLEEP)
+    combined_srt = _concatenate_course_srt(segments, NOTE_BRIEFING_CHARS)
+    briefing_prompt = _build_briefing_prompt(prefix, segments, combined_srt)
+    try:
+        print("   [简报] 正在根据全课转录生成 Executive Summary 与主题分析 …", flush=True)
+        briefing_raw = call_llm(client, briefing_prompt)
+        briefing_md = _clean_briefing(briefing_raw)
+    except Exception as e:
+        print(f"   ⚠️  简报生成失败: {e}", flush=True)
+        briefing_md = (
+            "## 执行摘要\n\n"
+            "- 本课程简报生成失败，请使用 `--force` 重新生成或检查 API。\n"
+        )
 
     # ── 组装笔记 ──
     table_header = (
@@ -587,7 +736,13 @@ def generate_for_prefix(
         "",
         "---",
         "",
-        "## 1. 结构化思维导图 (Mind Map)",
+        "## 1. 简报 (Briefing)",
+        "",
+        briefing_md,
+        "",
+        "---",
+        "",
+        "## 2. 结构化思维导图 (Mind Map)",
         "",
         "> 使用 Obsidian 插件 [Mindmap NextGen](obsidian://show-plugin?id=mindmap-nextgen) 可渲染为交互式思维导图。",
         "",
@@ -597,14 +752,14 @@ def generate_for_prefix(
         "",
         "---",
         "",
-        "## 2. 综合数据表格 (Data Table)",
+        "## 3. 综合数据表格 (Data Table)",
         "",
         table_header,
         "\n".join(all_datatable) if all_datatable else "| — | — | — | — | — | — |",
         "",
         "---",
         "",
-        "## 3. 各段详情 (Segment Details)",
+        "## 4. 各段详情 (Segment Details)",
     ]
     buf.extend(all_detail)
 
@@ -666,8 +821,11 @@ def main() -> int:
     if not api_key:
         print("❌ 未检测到 GROQ_API_KEY，请先在 .env 中配置", flush=True)
         return 2
-    if not OUTPUT_MEDIA.exists():
-        print(f"❌ 输出目录不存在：{OUTPUT_MEDIA}", flush=True)
+    if not OUTPUT_MEDIA.exists() and not SRT_EXPORTS_DIR.exists():
+        print(
+            f"❌ 未找到转录数据源：{OUTPUT_MEDIA} 或 {SRT_EXPORTS_DIR} 至少其一需存在",
+            flush=True,
+        )
         return 2
 
     client = Groq(api_key=api_key)
