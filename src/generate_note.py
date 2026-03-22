@@ -28,6 +28,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 OUTPUT_MEDIA = BASE_DIR / "data" / "output"
 SRT_EXPORTS_DIR = BASE_DIR / "data" / "srt_exports"
 NOTES_DIR = BASE_DIR / "notes"
+BLOG_DIR = NOTES_DIR / "blog"
 PROMPTS_DIR = BASE_DIR / "prompts"
 PROMPT_FILE = PROMPTS_DIR / "notebooklm_prompt.md"
 INDEX_FILE = NOTES_DIR / "INDEX.md"
@@ -37,6 +38,7 @@ NOTE_MODEL = os.getenv("NOTE_MODEL", "llama-3.3-70b-versatile")
 NOTE_MAX_TOKENS = int(os.getenv("NOTE_MAX_TOKENS", "4096"))
 NOTE_SRT_CHARS = int(os.getenv("NOTE_SRT_CHARS", "4000"))
 NOTE_BRIEFING_CHARS = int(os.getenv("NOTE_BRIEFING_CHARS", "12000"))
+NOTE_BLOGPOST_CHARS = int(os.getenv("NOTE_BLOGPOST_CHARS", "12000"))
 NOTE_SEGMENT_SLEEP = int(os.getenv("NOTE_SEGMENT_SLEEP", "10"))
 
 # ─── 预编译正则 ───────────────────────────────────────────────────────────────
@@ -368,6 +370,82 @@ def _clean_briefing(text: str) -> str:
             "## 执行摘要\n\n"
             "- 转录内容不足或生成失败，请检查 `NOTE_BRIEFING_CHARS` 或重试生成。\n"
         )
+    return cleaned
+
+
+def _build_blogpost_prompt(prefix: str, segments: List[Dict], combined_srt: str) -> str:
+    seg_list = ", ".join(
+        s["folder"].split("_", 3)[-1] if "_" in s["folder"] else s["folder"]
+        for s in segments
+    )
+    return "\n".join([
+        "你是一位文字简洁、思维犀利的内容创作者，正在为一个以高质量洞察见长的在线发布平台撰写博客文章。",
+        "",
+        "【最高优先级——反幻觉】",
+        "1. 所有论点、引语、事实均须来自下方转录，禁止凭空编造内容。",
+        "2. 如需引用讲师原话，必须是转录中出现的原话，不得改写或发明。",
+        "3. 禁止复读本提示词中的任何英文指令。",
+        "4. 输出语言：简体中文（专有名词保留英文）。",
+        "",
+        "【博文写作要求——严格遵循以下结构与风格】",
+        "",
+        "参考写作指令（须内化到写作风格，勿逐字输出）：",
+        "Act as a thoughtful writer and synthesizer of ideas, tasked with creating an engaging",
+        "and readable blog post for a popular online publishing platform known for its clean",
+        "aesthetic and insightful content. Your goal is to distill the top most surprising,",
+        "counter-intuitive, or impactful takeaways from the provided source materials into a",
+        "compelling listicle. The writing style should be clean, accessible, and highly",
+        "scannable, employing a conversational yet intelligent tone.",
+        "Craft a compelling, click-worthy headline.",
+        "Begin the article with a short introduction that hooks the reader by establishing a",
+        "relatable problem or curiosity, then present each of the takeaway points as a distinct",
+        "section with a clear, bolded subheading. Within each section, use short paragraphs to",
+        "explain the concept clearly, and don't just summarize; offer a brief analysis or a",
+        "reflection on why this point is so interesting or important, and if a powerful quote",
+        "exists in the sources, feature it in a blockquote for emphasis. Conclude the post with",
+        "a brief, forward-looking summary that leaves the reader with a final",
+        "thought-provoking question or a powerful takeaway to ponder.",
+        "",
+        "【输出格式规范】",
+        "- 第一行：一级标题（`# 标题`），即点击率高、令人好奇的文章标题",
+        "- 第二部分：2-3 句钩子式引言（不用二级标题，直接正文段落）",
+        "- 随后 4-6 个独立 takeaway 点，每点结构：",
+        "    `## [加粗短语式小标题]`",
+        "    短段落解释 + 分析（为什么这个点反直觉或重要）",
+        "    若有讲师金句，用 `> 引用块` 呈现",
+        "- 最后：`## 最后的问题` 节，1 段结语 + 1 个发人深省的问题句",
+        "- 全文不超过 1200 字，段落间保持一个空行",
+        "",
+        f"课程名称：{prefix}",
+        f"包含视频段（共 {len(segments)} 段）：{seg_list}",
+        "",
+        "--- 课程转录（sources）---",
+        combined_srt,
+        "",
+        "--- 直接输出博文 Markdown，勿加任何外层说明或代码块 ---",
+    ])
+
+
+def _clean_blogpost(text: str) -> str:
+    """清理博文 LLM 输出：去掉外层 markdown 包裹和泄漏的标记行。"""
+    lines = text.splitlines()
+    if lines and _RE_MARKDOWN_WRAP.match(lines[0]):
+        lines = lines[1:]
+        for i in range(len(lines) - 1, -1, -1):
+            if _RE_BACKTICK_LINE.match(lines[i].strip()):
+                lines = lines[:i]
+                break
+        text = "\n".join(lines)
+
+    out: List[str] = []
+    for line in text.splitlines():
+        if line.strip().startswith("<<<") or line.strip().startswith("==="):
+            continue
+        out.append(line)
+
+    cleaned = "\n".join(out).strip()
+    if not cleaned:
+        cleaned = "# 博文生成失败\n\n请使用 `--force` 重新生成或检查 API 配置。\n"
     return cleaned
 
 
@@ -769,6 +847,55 @@ def generate_for_prefix(
     return True
 
 
+# ─── 博文生成 ─────────────────────────────────────────────────────────────────
+def generate_blogpost_for_prefix(
+    client: Groq,
+    prefix: str,
+    *,
+    force: bool = False,
+) -> bool:
+    BLOG_DIR.mkdir(parents=True, exist_ok=True)
+    out_file = BLOG_DIR / f"{prefix}_blog.md"
+    if out_file.exists() and not force:
+        print(f"⏭️  博文已跳过: {prefix}（文件已存在，使用 --force 覆盖）", flush=True)
+        return False
+
+    segments = collect_segments(prefix)
+    if not segments:
+        print(f"❌ 博文跳过: {prefix}（未找到已转录视频段）", flush=True)
+        return False
+
+    print(f"\n✍️  开始生成博文: {prefix}", flush=True)
+    combined_srt = _concatenate_course_srt(segments, NOTE_BLOGPOST_CHARS)
+    prompt = _build_blogpost_prompt(prefix, segments, combined_srt)
+    try:
+        print("   [博文] 正在根据全课转录生成 Listicle 博文 …", flush=True)
+        raw = call_llm(client, prompt)
+        blog_md = _clean_blogpost(raw)
+    except Exception as e:
+        print(f"   ⚠️  博文生成失败: {e}", flush=True)
+        blog_md = f"# 博文生成失败\n\n> 课程：{prefix}\n> 错误：{e}\n"
+
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    header = "\n".join([
+        "---",
+        f"title: {prefix} - 博文",
+        f"created: {now}",
+        f"source_note: \"[[{prefix}.md]]\"",
+        "tags: [blog]",
+        "---",
+        "",
+    ])
+    content = header + blog_md + "\n"
+    out_file.write_text(content, encoding="utf-8")
+    print(
+        f"   ✅ 博文已保存：notes/blog/{prefix}_blog.md"
+        f"（{out_file.stat().st_size / 1024:.1f}KB）",
+        flush=True,
+    )
+    return True
+
+
 # ─── INDEX 重建 ───────────────────────────────────────────────────────────────
 def rebuild_index() -> None:
     NOTES_DIR.mkdir(exist_ok=True)
@@ -806,6 +933,8 @@ def main() -> int:
     p.add_argument("--all", action="store_true")
     p.add_argument("--force", action="store_true")
     p.add_argument("--update-index", action="store_true")
+    p.add_argument("--blog", action="store_true", help="同时生成博文（notes/blog/）")
+    p.add_argument("--blog-only", action="store_true", dest="blog_only", help="只生成博文，跳过笔记生成")
     args = p.parse_args()
 
     if args.update_index and not args.all and not args.prefix:
@@ -834,11 +963,32 @@ def main() -> int:
     if args.all:
         print(f"🔍 共 {len(prefixes)} 个课程前缀：{prefixes}", flush=True)
 
-    generated = sum(1 for pf in prefixes if generate_for_prefix(client, pf, force=args.force))
+    generate_notes = not args.blog_only
+    generate_blogs = args.blog or args.blog_only
 
-    print("\n🔄 正在更新 notes/INDEX.md ...", flush=True)
-    rebuild_index()
-    print(f"\n✅ 完成！本次新生成 {generated} 篇课程笔记。", flush=True)
+    generated_notes = 0
+    generated_blogs = 0
+
+    for pf in prefixes:
+        if generate_notes:
+            if generate_for_prefix(client, pf, force=args.force):
+                generated_notes += 1
+            if generate_blogs:
+                time.sleep(NOTE_SEGMENT_SLEEP)
+        if generate_blogs:
+            if generate_blogpost_for_prefix(client, pf, force=args.force):
+                generated_blogs += 1
+
+    if generate_notes:
+        print("\n🔄 正在更新 notes/INDEX.md ...", flush=True)
+        rebuild_index()
+
+    parts = []
+    if generate_notes:
+        parts.append(f"{generated_notes} 篇课程笔记")
+    if generate_blogs:
+        parts.append(f"{generated_blogs} 篇博文")
+    print(f"\n✅ 完成！本次新生成 {' + '.join(parts) if parts else '0 项'}。", flush=True)
     return 0
 
 

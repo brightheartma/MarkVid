@@ -1,6 +1,6 @@
 # 笔记生成 Prompt 文档（与 generate_note.py 同步）
 
-> **说明**：此文件为 `src/generate_note.py` 中分段 Prompt（`_build_segment_prompt()`）、课程简报 Prompt（`_build_briefing_prompt()`）的文档化版本，供人工审阅与调整参考。每次修改 Python 中的 Prompt 逻辑后，应同步更新本文件。
+> **说明**：此文件为 `src/generate_note.py` 中分段 Prompt（`_build_segment_prompt()`）、课程简报 Prompt（`_build_briefing_prompt()`）、课程博文 Prompt（`_build_blogpost_prompt()`）的文档化版本，供人工审阅与调整参考。每次修改 Python 中的 Prompt 逻辑后，应同步更新本文件。
 
 ---
 
@@ -18,8 +18,8 @@
 ## 角色与目标
 
 你是一个高信噪比的视频课程内容分析师。  
-针对每个视频段的 SRT 转录文本，生成结构化的 **三区块**（`<<<MINDMAP>>>` / `<<<DATATABLE>>>` / `<<<DETAIL>>>`）笔记内容；全部段完成后，再基于**全课转录**生成一节 **简报**（见文末「课程级简报」）。  
-最终由 Python 脚本汇总为可在 Obsidian 中完美渲染的 Markdown 课程笔记。
+针对每个视频段的 SRT 转录文本，生成结构化的 **三区块**（`<<<MINDMAP>>>` / `<<<DATATABLE>>>` / `<<<DETAIL>>>`）笔记内容；全部段完成后，再基于**全课转录**生成一节 **简报**（见「课程级简报」）；可选择同时生成独立的**博文**（见「课程级博文」）。  
+最终由 Python 脚本汇总为可在 Obsidian 中完美渲染的 Markdown 课程笔记，博文输出到独立文件。
 
 ---
 
@@ -131,7 +131,7 @@ title / created / segments / duration / srt_lines / frames
 ## 4. 各段详情 (Segment Details)  ← 每段一个 ### 4.X 小节
 ```
 
-`notes/INDEX.md` 和 `notes/000_我的视频知识大盘.md` 在每次生成后自动更新。
+`notes/INDEX.md` 在每次笔记生成后自动更新。博文不计入 INDEX，统一存放在 `notes/blog/` 目录。
 
 ---
 
@@ -144,3 +144,53 @@ title / created / segments / duration / srt_lines / frames
 > Create a comprehensive briefing document that synthesizes the main themes and ideas from the sources. Start with a concise Executive Summary that presents the most critical takeaways upfront. The body of the document must provide a detailed and thorough examination of the main themes, evidence, and conclusions found in the sources. This analysis should be structured logically with headings and bullet points to ensure clarity. The tone must be objective and incisive.
 
 **笔记中的章节编号**：`0` 素材 → `1` 简报 → `2` Mind Map → `3` Data Table → `4` 各段详情（分段小标题为 `### 4.x`）。
+
+---
+
+## 课程级博文：`NOTE_BLOGPOST_CHARS`（`generate_note.py`）
+
+通过 `--blog` 或 `--blog-only` flag 触发，为每门课独立生成一篇博文，输出到 `notes/blog/{prefix}_blog.md`。
+
+**调用函数**：`_build_blogpost_prompt()` / `_clean_blogpost()` / `generate_blogpost_for_prefix()`
+
+**转录截断上限**：`NOTE_BLOGPOST_CHARS`（默认 `12000`，与简报独立配置）
+
+**写作要求（与实现对齐）**：在反幻觉前提下，按下列英文规范内化撰写（输出为简体中文）：
+
+> Act as a thoughtful writer and synthesizer of ideas, tasked with creating an engaging and readable blog post for a popular online publishing platform known for its clean aesthetic and insightful content. Your goal is to distill the top most surprising, counter-intuitive, or impactful takeaways from the provided source materials into a compelling listicle. The writing style should be clean, accessible, and highly scannable, employing a conversational yet intelligent tone. Craft a compelling, click-worthy headline. Begin the article with a short introduction that hooks the reader by establishing a relatable problem or curiosity, then present each of the takeaway points as a distinct section with a clear, bolded subheading. Within each section, use short paragraphs to explain the concept clearly, and don't just summarize; offer a brief analysis or a reflection on why this point is so interesting or important, and if a powerful quote exists in the sources, feature it in a blockquote for emphasis. Conclude the post with a brief, forward-looking summary that leaves the reader with a final thought-provoking question or a powerful takeaway to ponder.
+
+**输出结构**：
+
+```
+# [钩子式标题]                         ← 一级标题
+                                        ← 2–3 句引言（无小标题）
+## [Takeaway 1 短语式小标题]           ← 4–6 个 takeaway 节
+短段落 + 分析 + 可选 > 引用块
+
+## 最后的问题                           ← 结语节
+1 段结语 + 1 个发人深省的问题句
+```
+
+**YAML frontmatter**（由脚本自动添加）：
+
+```yaml
+---
+title: {prefix} - 博文
+created: YYYY-MM-DD HH:MM
+source_note: "[[{prefix}.md]]"
+tags: [blog]
+---
+```
+
+**CLI 用法**：
+
+```bash
+# 同时生成笔记 + 博文
+python3 src/generate_note.py --prefix 00_15_第十五课：深入EVM与存储布局 --blog
+
+# 只生成博文（笔记已存在时）
+python3 src/generate_note.py --prefix 00_15_第十五课：深入EVM与存储布局 --blog-only
+
+# 全部课程都生成博文
+python3 src/generate_note.py --all --blog-only --force
+```
